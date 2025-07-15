@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+
+{% block title %}Home - OpenPR Publishing Platform{% endblock %}
+
+{% block content %}
+<div class="container-modern">
+    <!-- Hero Section -->
+    <div class="text-center py-5">
+        <h1 class="display-5 fw-bold text-dark mb-3">OpenPR Publishing Platform</h1>
+        <p class="lead text-muted mb-4">Streamline your market research data processing workflow</p>
+    </div>
+
+    <!-- Process Steps -->
+    <div class="feature-grid mb-4">
+        <div class="feature-card">
+            <div class="feature-icon">
+                <i class="fas fa-calendar-week"></i>
+            </div>
+            <h6 class="fw-semibold">Weekly Analysis</h6>
+            <p class="text-muted small mb-0">RID analysis and keyword matching</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">
+                <i class="fas fa-database"></i>
+            </div>
+            <h6 class="fw-semibold">Data Processing</h6>
+            <p class="text-muted small mb-0">ROB file extraction and preparation</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">
+                <i class="fas fa-share-alt"></i>
+            </div>
+            <h6 class="fw-semibold">Auto Publishing</h6>
+            <p class="text-muted small mb-0">Automated OpenPR content publishing</p>
+        </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="card-modern">
+        <div class="card-body-modern">
+            <div class="d-flex flex-column flex-md-row gap-3 justify-content-center">
+                <div class="text-center">
+                    <div class="step-indicator text-purple fw-bold">STEP 1</div>
+                    <a href="{{ url_for('weekly_report') }}" class="btn btn-info-modern btn-modern">
+                        <i class="fas fa-calendar-week me-2"></i>Weekly RID
+                    </a>
+                </div>
+                <div class="text-center">
+                    <div class="step-indicator text-purple fw-bold">STEP 2</div>
+                    <a href="{{ url_for('rob') }}" class="btn btn-primary-modern btn-modern">
+                        <i class="fas fa-file-excel me-2"></i>ROB Daily
+                    </a>
+                </div>
+                <div class="text-center">
+                    <div class="step-indicator text-purple fw-bold">STEP 3</div>
+                    <a href="{{ url_for('document_processing') }}" class="btn btn-success-modern btn-modern">
+                        <i class="fas fa-share-alt me-2"></i>OpenPR Publishing
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Process Information -->
+    <div class="card-modern mt-4">
+        <div class="card-header-modern">
+            <h6 class="mb-0">How It Works</h6>
+        </div>
+        <div class="card-body-modern">
+            <div class="row g-4">
+                <div class="col-md-4">
+                    <h6 class="text-primary mb-3">
+                        <span class="status-dot status-info"></span>
+                        Weekly Analysis
+                    </h6>
+                    <ul class="list-unstyled small text-muted">
+                        <li>• Upload ranking and ROB files</li>
+                        <li>• Apply search volume filters</li>
+                        <li>• Match qualified RIDs</li>
+                        <li>• Export processed data</li>
+                    </ul>
+                </div>
+                <div class="col-md-4">
+                    <h6 class="text-success mb-3">
+                        <span class="status-dot status-success"></span>
+                        Daily Processing
+                    </h6>
+                    <ul class="list-unstyled small text-muted">
+                        <li>• Extract specified row count</li>
+                        <li>• Generate ROB.xlsx file</li>
+                        <li>• Create remaining data file</li>
+                        <li>• Trigger automation flow</li>
+                    </ul>
+                </div>
+                <div class="col-md-4">
+                    <h6 class="text-warning mb-3">
+                        <span class="status-dot status-warning"></span>
+                        Auto Publishing
+                    </h6>
+                    <ul class="list-unstyled small text-muted">
+                        <li>• Convert documents to DOCX</li>
+                        <li>• Extract press release content</li>
+                        <li>• Auto-publish to OpenPR</li>
+                        <li>• Track publication status</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
