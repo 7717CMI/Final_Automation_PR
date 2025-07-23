@@ -2071,18 +2071,17 @@ class GoogleTrendsExtractor:
             "date": "now 7-d",   # Last 7 days
             "data_type": "TIMESERIES"
         }
-        
         try:
             response = requests.get(self.base_url, params=params)
-            
             if response.status_code == 200:
                 data = response.json()
                 values = self.extract_values(data)
                 return values
             else:
                 print(f"    API Error: {response.status_code}")
+                print(f"    Request URL: {response.url}")
+                print(f"    Response Content: {response.text}")
                 return []
-        
         except Exception as e:
             print(f"    Network Error: {e}")
             return []
@@ -2242,13 +2241,749 @@ def trigger_power_automate_flow():
         return jsonify({'status': 'error', 'message': f'Flow error: {e.stderr}'})
     
     return jsonify({'status': 'success', 'message': 'Power Automate process completed.'})
-@app.route('/custom_home')
-def custom_home():
-    """Custom home page for the application"""
-    return render_template('index.html')
+
 # ============================================================================
-# MAIN APPLICATION RUNNER
+#  Custom APPLICATION RUNNER
 # ============================================================================
+@app.route('/custom_index.html')
+def custom_index():
+    """Render custom index page for application"""
+    return render_template('custom_index.html')
+
+
+
+@app.route('/custom_weekly_report', methods=['GET', 'POST'])
+def custom_weekly_report():
+    if request.method == 'POST':
+        try:
+            print("Custom Weekly RID Analysis POST request received!")
+            
+            # Get filter parameters from form
+            min_search_volume = int(request.form.get('min_search_volume', 5000))
+            competition_level = request.form.get('competition_level', 'Low')
+            analyze_trends = request.form.get('analyze_trends') == 'on'
+            
+            print(f"Custom Weekly Filters: Search >= {min_search_volume}, Competition = {competition_level}")
+            print(f"Google Trends: {'Enabled' if analyze_trends else 'Disabled'}")
+            
+            # Validate form inputs
+            if not min_search_volume or min_search_volume < 0:
+                flash('❌ Please enter a valid minimum search volume!')
+                return redirect(request.url)
+                
+            if not competition_level:
+                flash('❌ Please select a competition level!')
+                return redirect(request.url)
+            
+            # Handle RANKING SHEET upload only
+            ranking_file = request.files.get('ranking_file')
+            if not ranking_file or ranking_file.filename == '':
+                flash('❌ Please select a ranking Excel file!')
+                return redirect(request.url)
+
+            if not allowed_file(ranking_file.filename):
+                flash('❌ Only Excel files (.xlsx, .xls) and CSV files are allowed for ranking sheet!')
+                return redirect(request.url)
+
+            # Save uploaded file
+            ranking_filename = secure_filename(ranking_file.filename)
+            ranking_path = os.path.join(app.config['UPLOAD_FOLDER'], ranking_filename)
+            ranking_file.save(ranking_path)
+            print(f"Ranking file saved: {ranking_path}")
+            
+            # Process the ranking file and get qualified RIDs
+            result_summary = process_custom_weekly_ranking_file(
+                ranking_path, min_search_volume, competition_level, analyze_trends
+            )
+            
+            # Format success/warning messages based on results
+            if result_summary['success']:
+                flash(f'✅ Success! Found {result_summary["qualified_rids_count"]} qualified RIDs')
+                flash(f'📁 Custom weekly RID analysis completed!')
+                print(f"Custom weekly analysis completed: {result_summary}")
+            else:
+                flash(f'❌ Error: {result_summary.get("error", "Unknown error")}')
+                result_summary = None
+            
+            # Clean up uploaded file after processing
+            try:
+                os.remove(ranking_path)
+                print(f"Cleaned up uploaded file")
+            except Exception as cleanup_error:
+                print(f"Warning: Could not clean up file: {cleanup_error}")
+            
+            # Render template with results
+            return render_template('custom_weekly_report.html', 
+                                  qualified_rids=result_summary.get('qualified_rids', []) if result_summary else [],
+                                  filter_summary=result_summary.get('filter_summary', {}) if result_summary else {},
+                                  custom_weekly_result=result_summary)
+            
+        except ValueError as ve:
+            print(f"Value Error: {ve}")
+            flash('❌ Invalid input values. Please check your filters.')
+            return redirect(request.url)
+        except Exception as e:
+            print(f"Error: {e}")
+            flash(f'❌ Error processing file: {str(e)}')
+            return redirect(request.url)
+    
+    # GET request - show custom weekly form
+    return render_template('custom_weekly_report.html')
+
+def process_custom_weekly_ranking_file(ranking_path, min_search_volume, competition_level, analyze_trends):
+    """Process ranking file for custom weekly analysis (no ROB matching)"""
+    try:
+        print(f"\n=== PROCESSING CUSTOM WEEKLY RANKING FILE ===")
+        print(f"Ranking file: {ranking_path}")
+        
+        # Process ranking sheet to get qualified RIDs
+        qualified_rids, filter_summary, updated_ranking_path = get_qualified_rids_and_remove_trending(
+            ranking_path, min_search_volume, competition_level, analyze_trends
+        )
+        
+        if not qualified_rids:
+            return {
+                'success': False,
+                'error': 'No qualified RIDs found in ranking sheet with your filter criteria'
+            }
+        
+        print(f"✅ Found {len(qualified_rids)} qualified RIDs for custom weekly analysis")
+        
+        # Read the original ranking file to get RID and Keywords data
+        if ranking_path.endswith('.csv'):
+            df_original = pd.read_csv(ranking_path)
+        else:
+            df_original = pd.read_excel(ranking_path, engine='openpyxl')
+        
+        print(f"Original file columns: {list(df_original.columns)}")
+        
+        # Convert qualified_rids to same type as RID column for matching
+        df_original['RID'] = df_original['RID'].astype(str).str.strip()
+        qualified_rids_str = [str(rid).strip() for rid in qualified_rids]
+        
+        # Filter rows that match qualified RIDs and select only RID and Keywords columns
+        qualified_data = df_original[df_original['RID'].isin(qualified_rids_str)][['RID', 'Keywords']].copy()
+        
+        print(f"Qualified data shape: {qualified_data.shape}")
+        print(f"Sample data:\n{qualified_data.head()}")
+        
+        # Save to Desktop/RPA folder as Excel file
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        rpa_folder = os.path.join(desktop_path, "RPA")
+        
+        if not os.path.exists(rpa_folder):
+            os.makedirs(rpa_folder)
+        
+        output_path = os.path.join(rpa_folder, 'Custom_weekly_ROB.xlsx')
+        
+        # Export to Excel - CORRECTED VERSION
+        qualified_data.to_excel(output_path, index=False, engine='xlsxwriter')
+        
+        print(f"✅ Custom weekly ROB Excel saved to: {output_path}")
+        print(f"Excel contains {len(qualified_data)} rows with RID and Keywords")
+        
+        # Verify file was created
+        if os.path.exists(output_path):
+            print(f"✅ File verification: Excel file exists at {output_path}")
+        else:
+            print(f"❌ File verification: Excel file NOT found at {output_path}")
+        
+        # Create comprehensive summary
+        summary = {
+            'success': True,
+            'qualified_rids': qualified_rids,
+            'qualified_rids_count': len(qualified_rids),
+            'output_path': output_path,
+            'filter_summary': filter_summary,
+            'analysis_type': 'custom_weekly',
+            'excel_rows': len(qualified_data)
+        }
+        
+        return summary
+        
+    except Exception as e:
+        print(f"Error in custom weekly ranking file processing: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e)
+        }
+    
+
+@app.route('/custom_choice')
+def custom_choice():
+    """Custom choice page for CMI/WMR selection"""
+    return render_template('custom_choice.html')
+
+
+
+@app.route('/custom_cmi_cta', methods=['GET', 'POST'])
+def custom_cmi_cta():
+    if request.method == 'POST':
+        try:
+            # Get form data (only extract_count now since user info fields are removed)
+            extract_count = int(request.form.get('extract_count', 200))
+
+            # Validate required fields (only extract_count and file now)
+            if not extract_count or extract_count < 1:
+                flash('❌ Please enter a valid number of keywords to extract!')
+                return redirect(request.url)
+
+            file = request.files.get('file')
+            if not file or file.filename == '':
+                flash('❌ Keywords file is required!')
+                return redirect(request.url)
+
+            if not allowed_file(file.filename):
+                flash('❌ Only Excel files (.xlsx, .xls) and CSV files are allowed!')
+                return redirect(request.url)
+
+            # Use secure_filename to avoid path issues
+            filename = secure_filename(file.filename)
+            input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(input_path)
+
+            # Process the file for CMI CTA generation
+            result = process_cmi_cta_file(input_path, extract_count)
+            
+            if result['success']:
+                flash(f'✅ Successfully processed {result["extracted_count"]} keywords!')
+                flash(f'📁 File saved: {result["filename"]}')
+                flash('🤖 CMI automation started!')
+                
+                # Start CMI automation in background
+                threading.Thread(target=run_cmi_automation).start()
+            else:
+                flash(f'❌ Error: {result["error"]}')
+
+            return render_template('custom_cmi_cta.html')
+
+        except ValueError as ve:
+            flash('❌ Please enter a valid number for keywords to extract!')
+            return redirect(request.url)
+        except Exception as e:
+            flash(f'❌ Error processing file: {str(e)}')
+            return redirect(request.url)
+    
+    return render_template('custom_cmi_cta.html')
+
+def process_cmi_cta_file(file_path, extract_count):
+    """Process Custom Weekly ROB file for CMI CTA generation"""
+    try:
+        # Read the file
+        if file_path.endswith('.csv'):
+            df_original = pd.read_csv(file_path)
+        else:
+            df_original = pd.read_excel(file_path, engine='openpyxl')
+
+        total_rows = len(df_original)
+        
+        if total_rows < extract_count:
+            extract_count = total_rows
+
+        # Step 1: Extract top N rows for CTA generation
+        extracted_rows = df_original.head(extract_count).copy()
+        
+        # Step 2: Get remaining rows (original minus extracted)
+        remaining_rows = df_original.iloc[extract_count:].copy()
+        
+        # Create filename with current date for extracted data
+        today = datetime.today()
+        extracted_filename = f"custom_reports_cmi_{today.year}_{today.month:02d}_{today.day:02d}.xlsx"
+        
+        # Save extracted data to Desktop/RPA folder
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        rpa_folder = os.path.join(desktop_path, "RPA")
+        
+        if not os.path.exists(rpa_folder):
+            os.makedirs(rpa_folder)
+        
+        # Save extracted keywords file
+        extracted_output_path = os.path.join(rpa_folder, extracted_filename)
+        extracted_rows.to_excel(extracted_output_path, index=False)
+        
+        # Step 3: Update the original Custom_weekly_ROB.xlsx file with remaining data
+        custom_weekly_rob_path = os.path.join(rpa_folder, 'Custom_weekly_ROB.xlsx')
+        
+        if os.path.exists(custom_weekly_rob_path):
+            # Update the original file with remaining rows
+            remaining_rows.to_excel(custom_weekly_rob_path, index=False)
+            print(f"✅ Updated Custom_weekly_ROB.xlsx - Removed {extract_count} extracted keywords")
+            print(f"✅ Custom_weekly_ROB.xlsx now contains {len(remaining_rows)} remaining keywords")
+        else:
+            print(f"⚠️ Warning: Custom_weekly_ROB.xlsx not found at {custom_weekly_rob_path}")
+        
+        return {
+            'success': True,
+            'extracted_count': extract_count,
+            'remaining_count': len(remaining_rows),
+            'total_count': total_rows,
+            'filename': extracted_filename,
+            'output_path': extracted_output_path,
+            'updated_original': os.path.exists(custom_weekly_rob_path)
+        }
+        
+    except Exception as e:
+        print(f"Error in process_cmi_cta_file: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+def run_cmi_automation():
+    """Run CMI automation using Selenium"""
+    try:
+        print("Starting CMI automation...")
+        
+        from webdriver_manager.chrome import ChromeDriverManager
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import Select
+        import time
+        
+        chromedriver_path = ChromeDriverManager().install()
+        options = Options()
+        #options.add_argument("--headless")  # Run headlessly for deployment
+        options.add_argument("--start-maximized")
+        
+        # Initialize WebDriver
+        cService = Service(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=cService, options=options)
+        driver.get('https://www.coherentmarketinsights.com/cmisitmanup/index.php')
+        
+        username_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH,'//*[@id="adlogin"]/div[1]/input'))
+        )
+        username_input.send_keys('Auto_Ops_Team')
+        
+        password_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH,'//*[@id="adlogin"]/div[2]/input'))
+        )
+        password_input.send_keys('kDp7%8^03Ib')
+        
+        signup_click = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH,'//*[@id="adlogin"]/div[3]/div/button'))
+        )
+        signup_click.click()
+        
+        custom_insights_click = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH,'/html/body/div/aside/section/ul/li[3]/a/span[1]'))
+        )
+        custom_insights_click.click()
+        
+        print("CMI automation completed successfully!")
+        
+        # Keep browser open for now - you can modify this behavior
+        time.sleep(10)
+        # driver.quit()  # Uncomment to close browser automatically
+        
+    except Exception as e:
+        print(f"CMI automation error: {e}")
+
+
+@app.route('/custom_wmr_cta', methods=['GET', 'POST'])
+def custom_wmr_cta():
+    if request.method == 'POST':
+        try:
+            # Get form data (only extract_count now since user info fields are removed)
+            extract_count = int(request.form.get('extract_count', 200))
+
+            # Validate required fields (only extract_count and file now)
+            if not extract_count or extract_count < 1:
+                flash('❌ Please enter a valid number of keywords to extract!')
+                return redirect(request.url)
+
+            file = request.files.get('file')
+            if not file or file.filename == '':
+                flash('❌ Keywords file is required!')
+                return redirect(request.url)
+
+            if not allowed_file(file.filename):
+                flash('❌ Only Excel files (.xlsx, .xls) and CSV files are allowed!')
+                return redirect(request.url)
+
+            # Use secure_filename to avoid path issues
+            filename = secure_filename(file.filename)
+            input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(input_path)
+
+            # Process the file for WMR CTA generation
+            result = process_wmr_cta_file(input_path, extract_count)
+            
+            if result['success']:
+                flash(f'✅ Successfully processed {result["extracted_count"]} keywords!')
+                flash(f'📁 File saved: {result["filename"]}')
+                flash('🤖 WMR automation started!')
+                
+                # Start WMR automation in background
+                threading.Thread(target=run_wmr_automation).start()
+            else:
+                flash(f'❌ Error: {result["error"]}')
+
+            return render_template('custom_wmr_cta.html')
+
+        except ValueError as ve:
+            flash('❌ Please enter a valid number for keywords to extract!')
+            return redirect(request.url)
+        except Exception as e:
+            flash(f'❌ Error processing file: {str(e)}')
+            return redirect(request.url)
+    
+    return render_template('custom_wmr_cta.html')
+
+
+def process_wmr_cta_file(file_path, extract_count):
+    """Process Custom Weekly ROB file for WMR CTA generation"""
+    try:
+        # Read the file
+        if file_path.endswith('.csv'):
+            df_original = pd.read_csv(file_path)
+        else:
+            df_original = pd.read_excel(file_path, engine='openpyxl')
+
+        total_rows = len(df_original)
+        
+        if total_rows < extract_count:
+            extract_count = total_rows
+
+        # Step 1: Extract top N rows for WMR CTA generation
+        extracted_rows = df_original.head(extract_count).copy()
+        
+        # Step 2: Get remaining rows (original minus extracted)
+        remaining_rows = df_original.iloc[extract_count:].copy()
+        
+        # Create filename with current date for extracted data
+        today = datetime.today()
+        extracted_filename = f"custom_reports_wmr_{today.year}_{today.month:02d}_{today.day:02d}.xlsx"
+        
+        # Save extracted data to Desktop/RPA folder
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        rpa_folder = os.path.join(desktop_path, "RPA")
+        
+        if not os.path.exists(rpa_folder):
+            os.makedirs(rpa_folder)
+        
+        # Save extracted keywords file
+        extracted_output_path = os.path.join(rpa_folder, extracted_filename)
+        extracted_rows.to_excel(extracted_output_path, index=False)
+        
+        # Step 3: Update the original Custom_weekly_ROB.xlsx file with remaining data
+        custom_weekly_rob_path = os.path.join(rpa_folder, 'Custom_weekly_ROB.xlsx')
+        
+        if os.path.exists(custom_weekly_rob_path):
+            # Update the original file with remaining rows
+            remaining_rows.to_excel(custom_weekly_rob_path, index=False)
+            print(f"✅ Updated Custom_weekly_ROB.xlsx - Removed {extract_count} extracted keywords for WMR")
+            print(f"✅ Custom_weekly_ROB.xlsx now contains {len(remaining_rows)} remaining keywords")
+        else:
+            print(f"⚠️ Warning: Custom_weekly_ROB.xlsx not found at {custom_weekly_rob_path}")
+        
+        return {
+            'success': True,
+            'extracted_count': extract_count,
+            'remaining_count': len(remaining_rows),
+            'total_count': total_rows,
+            'filename': extracted_filename,
+            'output_path': extracted_output_path,
+            'updated_original': os.path.exists(custom_weekly_rob_path)
+        }
+        
+    except Exception as e:
+        print(f"Error in process_wmr_cta_file: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def run_wmr_automation():
+    """Run WMR automation using Selenium with your provided code"""
+    try:
+        print("Starting WMR automation...")
+        
+        from webdriver_manager.chrome import ChromeDriverManager
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import Select
+        import time
+
+        chromedriver_path = ChromeDriverManager().install()
+        options = Options()
+        #options.add_argument("--headless")  # Run headlessly for deployment
+        options.add_argument("--start-maximized")
+
+        # Initialize WebDriver
+        cService = Service(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=cService, options=options)
+        driver.get('https://www.worldwidemarketreports.com/imanagereports')
+                
+        username_input = WebDriverWait(driver, 10).until(
+             EC.presence_of_element_located((By.XPATH,'//*[@id="adlogin"]/div[1]/input'))
+            )
+        username_input.send_keys('Auto_Ops_Team')
+                
+        password_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH,'//*[@id="adlogin"]/div[2]/input'))
+            )
+        password_input.send_keys('M9b@0j9Y28O')
+                
+        login_click = WebDriverWait(driver, 10).until(
+          EC.element_to_be_clickable((By.XPATH,'//*[@id="adlogin"]/div[3]/div/button'))
+            )
+        login_click.click()
+                
+        custom_insights_click = WebDriverWait(driver, 10).until(
+           EC.element_to_be_clickable((By.XPATH,'/html/body/div/aside/section/ul/li[3]/a/span[1]'))
+            )
+        custom_insights_click.click()
+        
+        print("WMR automation completed successfully!")
+        
+        # Keep browser open for now - you can modify this behavior
+        time.sleep(10)
+        # driver.quit()  # Uncomment to close browser automatically
+        
+    except Exception as e:
+        print(f"WMR automation error: {e}")
+
+
+@app.route('/custom_content_generation_choice')
+def custom_content_generation_choice():
+    """Custom content generation choice page"""
+    return render_template('custom_content_generation_choice.html')
+
+# Add these imports at the top if not already present
+import openai
+from docx import Document
+import re
+
+# Configure OpenAI (add your API key)
+OPENAI_API_KEY = "sk-osX5I2lupISEx3asBA8gO71GgcmPp7mIcUWoczALHVT3BlbkFJF72ozu5mUnkKmLgiSepX7n5Fd-UmvHC5g1JhBA33YA"  # Replace with your actual API key
+
+@app.route('/custom_ai_content', methods=['GET', 'POST'])
+def custom_ai_content():
+    if request.method == 'POST':
+        try:
+            # Handle file upload
+            cta_file = request.files.get('cta_file')
+            if not cta_file or cta_file.filename == '':
+                flash('❌ CTA excel file is required!')
+                return redirect(request.url)
+
+            if not allowed_file(cta_file.filename):
+                flash('❌ Only Excel files (.xlsx, .xls) are allowed!')
+                return redirect(request.url)
+
+            # Save uploaded file
+            filename = secure_filename(cta_file.filename)
+            input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            cta_file.save(input_path)
+
+            # Process the file for AI content generation
+            result = process_ai_content_generation(input_path)
+            
+            if result['success']:
+                flash(f'✅ Successfully generated {result["articles_created"]} AI articles!')
+                flash(f'📁 Articles saved to Desktop/RPA folder')
+            else:
+                flash(f'❌ Error: {result["error"]}')
+
+            # Clean up uploaded file
+            try:
+                os.remove(input_path)
+            except:
+                pass
+
+            return render_template('custom_ai_content.html')
+
+        except Exception as e:
+            flash(f'❌ Error processing file: {str(e)}')
+            return redirect(request.url)
+    
+    return render_template('custom_ai_content.html')
+
+def clean_title(title):
+    """Remove 'Market' and related words from title"""
+    # Remove common market-related terms
+    market_terms = [
+        r'\bmarket\b', r'\bMarket\b', r'\bMARKET\b',
+        r'\bmarket size\b', r'\bMarket Size\b',
+        r'\bmarket analysis\b', r'\bMarket Analysis\b',
+        r'\bmarket research\b', r'\bMarket Research\b',
+        r'\bmarket report\b', r'\bMarket Report\b',
+        r'\bmarket study\b', r'\bMarket Study\b'
+    ]
+    
+    cleaned_title = title
+    for term in market_terms:
+        cleaned_title = re.sub(term, '', cleaned_title, flags=re.IGNORECASE)
+    
+    # Clean up extra spaces and punctuation
+    cleaned_title = re.sub(r'\s+', ' ', cleaned_title).strip()
+    cleaned_title = re.sub(r'^[-\s]+|[-\s]+$', '', cleaned_title)
+    
+    return cleaned_title
+
+def generate_article_with_openai(clean_title, promo_link, sample_link):
+    """Generate article using OpenAI API"""
+    try:
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        
+        prompt = f"""
+
+We are coherent market insights and going to publish this data on third part PR website, thus do not mention any competitors name (market intelligence firm, market research, consulting and data and analytics companies), and take ownership for market share, size, growth rate as this research done by our own research team however any real instances and stats you can use reference such as company or organisation or others as mentioned in detail explanation. Write the blog covering the below pointers: Start content with market size and overview paragraph (do not add heading and do not use bullet for this section), ➔ add first CTA link here, ➤Actionable Insights, ➤Market Segment and Regional coverage, ➔ add Second CTA link here, ➤Key players, ➤Growth factors, ➤ Market trends, ➤Key takeaways, and ❓ Frequently Asked Questions, All these pointers should act as a heading to respective paragraphs, do not miss any bullet foe above given. Consider the following points while generating content: Flow of information, all given secondary keywords must be covered, and there should be a heading for each paragraph or bullet pointers. Try to cover content in in bullet pointers whenever possible each paragraph should be short, about 100 to 120 words. Our readers are already experts in the field, so always try to generate content that provides unique insights and value addition for experts. Thus, while generating each piece of content, it should be data-backed with actual instances and stats from recent years 2025 and 2024, covering maximum stats that increase the authenticity and are enough to support or make decisions based upon reading this blog. Do not add generic content that is already known to readers, such as definitions, advantages, disadvantages, or other generic content. Flow of information should be as below. Start the blog with writing 5 to 7 sentence ling paragraph start content with talking about Industry in 2 to 3 sentences and should be matches with heading of the blog. followed by 2 to 4 sentence on market size and CAGR formatted as The Global (Insert Market Name) Market size is estimated to be valued at USD (Identify and Insert Market Value for 2025) in 2025 (market size) and is expected to reach USD (Identify and Insert Market Value for 2032) by 2032 (market forecast), exhibiting a compound annual growth rate (CAGR) of (Identify and Insert CAGR)% from 2025 to 2032. Do not add heading and do not use bullet for this section. (Make sure all values such as market size, CAGR, key players should be carefully identified with research approach).  Then First CTA link. Then Actionable Insights: In Actionable Insights, include essential quantitative indicators that lead to market size. For example, supply-side indicators (Production Capacity, Pricing, and Exports), demand-side indicators (Pricing, Imports, Various Use Cases across industries), micro-indicators, nano-size indicators—focus more on the quantitative aspects. Add stats or actual instance examples from the recent year to support the given heading. Next part is Market segment and regional Coverage where enlist the all subsegment under each segment categories and fragment region into given format. Comprehensive Segmentation and Classification of the Report: » By Segment 1: subsegment 1, subsegment 2, subsegment 3, subsegment 4, and Others. » By Segment 1: subsegment 1, subsegment 2, subsegment 3, subsegment 4, and Others. » By Segment 1: subsegment 1, subsegment 2, subsegment 3, subsegment 4, and Others. Regional and Country Analysis: » North America: U.S. and Canada » Latin America: Brazil, Argentina, Mexico, and Rest of Latin America » Europe: Germany, U.K., Spain, France, Italy, Benelux, Denmark, Norway, Sweden, Russia, and Rest of Europe » Asia Pacific: China, Taiwan, India, Japan, South Korea, Indonesia, Malaysia, Philippines, Singapore, Australia, and Rest of Asia Pacific » Middle East & Africa: Bahrain, Kuwait, Oman, Qatar, Saudi Arabia, United Arab Emirates, Israel, South Africa, North Africa, Central Africa, and Rest of MEA. Then Second CTA link. Then key Players: List 12 to 20 highly relevant key players for the given market. Furthermore, add 2-3 statements on competitive strategies adopted by a few key players, mentioning actual strategies and entities involved along with the actual outcome. Growth Factors: Growth factor heading and short description with supporting stats or examples from the recent year in the content. Then Market Trends: Market Trend heading and short description with supporting stats or examples from the recent year in the content. Then Key takeaways: Add total 6 key takeaways covering one line of description on each point.  Segment Covers (2-3 segments and sub-segments under each segment): Enlist 2-3 segments and all subsegments that fall under each segment for the given market. Mention the fastest-growing sub-segment and dominating sub-segment under each segment along with an instance from a recent year 2025 and 2024 that will support the given statement. In continuation enlist 2-3 insightful regions: Mention the Dominating region, fastest growing region, and add actual instances to support both the dominating and fastest-growing regions. Dominating Region: List one dominating region for the given market from North America, Latin America, Europe, Asia Pacific, Middle East, and Africa. Fastest Growing Region: List one of the fastest-growing regions for the given market from the above-mentioned regions. Make sure to not to mention our organization name or relevant terms anywhere in the output such as coherent market insights or our analyst team or our research team. Given Market Name and Data:  
+
+
+. From an SEO perspective, we need to cover all given keywords from the list below. However, they should appear naturally so that the content flow looks natural for the reader. Keyword List: market share, market size, market research, market insights, market trends, market opportunities, market challenges, market growth, market forecast, market companies, market players, market analysis, market drivers, market restraints, market scope, market dynamics, market segments, market report, market growth strategies, market revenue, industry size, industry share, industry trends, and business growth, furthermore - Market size and market report, market revenue, market share, trends keywords are mandatory to be added twice in content. In addition to the above requirement, in 5 places, add the actual market name along with the above keywords so that long-tail keywords will be generated. These long-tail keywords are market name + size, market name + report, market name + revenue, market name + share, market name + trends. Make sure all given keywords are naturally fit, do not try to infuse forcefully, flow of information should be natural and meaningful, furthermore make sure spelling and structure of sentences from generated output are grammatically correct. Furthermore, based on the market name, create a set of Frequently Asked Questions that are highly relevant and customized to the specific market. The sample Frequently Asked Questions below are for understanding purposes only. For the given market, questions can be completely replaced. However, please tailor the actual questions to the market name and the insights provided in the report: 1. Who are the dominant players in the (Market Name) market? 2. What will be the size of the (Market Name) market in the coming years? 3. Which end users industry has the largest growth opportunity? 4. How will market development trends evolve over the next five years? 5. What is the nature of the competitive landscape and challenges in the (Market Name) market? 6. What go-to-market strategies are commonly adopted in the (Market Name) market? Make sure to answer to all FAQs. In the case of country-level markets, please exclude the word 'Global' and key takeaways where other regions are mentioned. Make sure to add catchy bullet in generated output. I have shared the reference bullet with you. Make sure to add this bullet. For heading use these bullet- ➤Actionable Insights, ➤Market Segment and Regional Coverage, ➔ Inserted Second CTA link, ➤Key Players, ➤Growth factors, ➤ Market Trends, ➤Key Takeaways, and ❓ Frequently Asked Questions. Make sure do not miss any Bullet including CTA bullet which is ➔. For subpointers under main headings use bullets which is in reference as provided- Actionable Insights ●, Market Segment and Regional Coverage●, Key players●, Growth Factors●,  Market Trends●, Key Takeaways●. Make sure to use these bullets for given subpointers. Make sure bullet appear properly and there should be single bullet for one points, ensure there no two adjacent bullet immediate to next to each other.
+"""
+        
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "You are a professional market research writer specializing in industry analysis articles."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        print(f"OpenAI error: {e}")
+        return f"""
+{clean_title} - Market Analysis
+
+Market Overview:
+The {clean_title} industry represents a significant segment in today's market landscape. This sector has shown remarkable growth potential and continues to attract attention from investors and industry analysts.
+
+Key Players:
+Leading companies in this space are driving innovation and market expansion. For detailed market insights and analysis, industry professionals can access comprehensive research at {promo_link}.
+
+Growth Factors:
+Several factors contribute to the growth of this market, including technological advancements, increasing demand, and strategic market positioning.
+
+Market Trends:
+Current trends indicate strong market momentum with various opportunities for stakeholders. Additional market data and samples are available through {sample_link}.
+
+Key Takeaways:
+The {clean_title} sector presents substantial opportunities for growth and investment in the coming years.
+"""
+
+def save_article_as_doc(article_content, clean_title):
+    """Save article as .doc file"""
+    try:
+        # Create Word document
+        doc = Document()
+        
+        # Add title
+        title_paragraph = doc.add_heading(f"{clean_title} - Market Analysis", level=1)
+        
+        # Add content paragraphs
+        paragraphs = article_content.split('\n\n')
+        for paragraph in paragraphs:
+            if paragraph.strip():
+                doc.add_paragraph(paragraph.strip())
+        
+        # Create filename
+        today = datetime.today()
+        safe_title = re.sub(r'[^\w\s-]', '', clean_title.lower())
+        safe_title = re.sub(r'[-\s]+', '_', safe_title)
+        filename = f"{safe_title}_cmi_{today.year}_{today.month:02d}_{today.day:02d}.doc"
+        
+        # Save to Desktop/RPA
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        rpa_folder = os.path.join(desktop_path, "RPA")
+        
+        if not os.path.exists(rpa_folder):
+            os.makedirs(rpa_folder)
+        
+        file_path = os.path.join(rpa_folder, filename)
+        doc.save(file_path)
+        
+        return True, filename
+        
+    except Exception as e:
+        print(f"Error saving document: {e}")
+        return False, str(e)
+
+def process_ai_content_generation(file_path):
+    """Process CTA excel file and generate AI articles"""
+    try:
+        print(f"\n=== PROCESSING AI CONTENT GENERATION ===")
+        print(f"File: {file_path}")
+        
+        # Read the excel file
+        df = pd.read_excel(file_path, engine='openpyxl')
+        
+        print(f"Excel columns: {list(df.columns)}")
+        print(f"Found {len(df)} rows to process")
+        
+        # Verify required columns exist
+        required_columns = ['Title', 'PromoBuy', 'SampleLink']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            return {
+                'success': False,
+                'error': f'Missing required columns: {missing_columns}'
+            }
+        
+        articles_created = 0
+        
+        # Process each row
+        for index, row in df.iterrows():
+            try:
+                original_title = str(row['Title'])
+                promo_link = str(row['PromoBuy'])
+                sample_link = str(row['SampleLink'])
+                
+                print(f"\n[{index+1}/{len(df)}] Processing: {original_title}")
+                
+                # Clean the title - FIXED: Use different variable name
+                cleaned_title = clean_title(original_title)  # ✅ FIXED!
+                print(f"Cleaned title: {cleaned_title}")
+                
+                # Generate article using OpenAI
+                print("Generating article with OpenAI...")
+                article_content = generate_article_with_openai(cleaned_title, promo_link, sample_link)
+                
+                # Save as .doc file
+                success, filename = save_article_as_doc(article_content, cleaned_title)
+                
+                if success:
+                    print(f"✅ Article saved: {filename}")
+                    articles_created += 1
+                else:
+                    print(f"❌ Failed to save article: {filename}")
+                
+                # Small delay to avoid API rate limits
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"❌ Error processing row {index+1}: {e}")
+                continue
+        
+        return {
+            'success': True,
+            'articles_created': articles_created,
+            'total_rows': len(df)
+        }
+        
+    except Exception as e:
+        print(f"Error in AI content generation: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 if __name__ == '__main__':
     import webbrowser
